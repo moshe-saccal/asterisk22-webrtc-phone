@@ -1,0 +1,155 @@
+#!/bin/sh
+#
+# Generates the dynamic parts of the Asterisk configuration from the
+# environment and from users.json. Output goes to /var/lib/asterisk/generated
+# and is pulled in by #tryinclude statements in the static config files.
+#
+#   pjsip_users.conf               endpoints / auths / aors for every user
+#   extensions_users.conf          dialplan + device-state hints per user
+#   pjsip_transport_nat.conf       external address for UDP/TCP/TLS transports
+#   rtp_general.conf               RTP port range, STUN / TURN
+#   rtp_ice_host_candidates.conf   maps the container IP to EXTERNAL_IP for ICE
+#
+set -eu
+
+OUT_DIR="${GENERATED_DIR:-/var/lib/asterisk/generated}"
+USERS_FILE="${USERS_FILE:-/etc/pbx/users.json}"
+RTP_PORT_START="${RTP_PORT_START:-10000}"
+RTP_PORT_END="${RTP_PORT_END:-10099}"
+EXTERNAL_IP="${EXTERNAL_IP:-}"
+STUN_SERVER="${STUN_SERVER:-}"
+TURN_SERVER="${TURN_SERVER:-}"
+TURN_USERNAME="${TURN_USERNAME:-}"
+TURN_PASSWORD="${TURN_PASSWORD:-}"
+
+log() { echo "[gen-config] $*"; }
+die() { echo "[gen-config] ERROR: $*" >&2; exit 1; }
+
+mkdir -p "$OUT_DIR"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+#------------------------------------------------------------------------------
+# Users
+#------------------------------------------------------------------------------
+[ -f "$USERS_FILE" ] || die "users file not found: $USERS_FILE"
+jq empty "$USERS_FILE" 2>/dev/null || die "$USERS_FILE is not valid JSON"
+
+errors="$(jq -r '
+  def reserved: ["600","601","602","603","700"];
+  if (.users | type) != "array" or (.users | length) == 0 then
+    "\"users\" must be a non-empty array"
+  else
+    (.users | to_entries[] | .key as $i | .value |
+      (if (.extension | tostring | test("^[0-9]{2,10}$")) | not
+         then "users[\($i)]: extension must be 2-10 digits" else empty end),
+      (if ((.extension | tostring) as $e | reserved | index($e)) != null
+         then "users[\($i)]: extension \(.extension) is reserved for a built-in service" else empty end),
+      (if (.password | type) != "string" or (.password | length) < 8
+         then "users[\($i)]: password must be a string of at least 8 characters" else empty end),
+      (if (.password | type) == "string" and (.password | test("[;\\s\"#\\\\]"))
+         then "users[\($i)]: password must not contain spaces, quotes, ; # or \\" else empty end),
+      (if ((.type // "webrtc") | IN("webrtc", "sip")) | not
+         then "users[\($i)]: type must be \"webrtc\" or \"sip\"" else empty end)
+    ),
+    (.users | map(.extension | tostring) | group_by(.) | map(select(length > 1) | .[0])[]
+      | "duplicate extension \(.)")
+  end
+' "$USERS_FILE")"
+[ -z "$errors" ] || die "invalid $USERS_FILE:
+$errors"
+
+jq -r '
+  def clean: tostring | gsub("[\"\\r\\n;<>]"; "");
+  "; Generated from users.json — do not edit, changes will be overwritten.",
+  "",
+  (.users[]
+    | (.extension | tostring) as $ext
+    | (.type // "webrtc") as $kind
+    | (.name // $ext | clean) as $name
+    | ";--- \($ext): \($name) (\($kind))",
+      "[\($ext)](\($kind)-endpoint)",
+      "auth = \($ext)",
+      "aors = \($ext)",
+      "callerid = \"\($name)\" <\($ext)>",
+      "",
+      "[\($ext)](auth-userpass)",
+      "username = \($ext)",
+      "password = \(.password)",
+      "",
+      "[\($ext)](aor-\($kind))",
+      "")
+' "$USERS_FILE" > "$TMP_DIR/pjsip_users.conf"
+
+jq -r '
+  "; Generated from users.json — do not edit, changes will be overwritten.",
+  (.users[]
+    | (.extension | tostring) as $ext
+    | "exten => \($ext),hint,PJSIP/\($ext)",
+      "exten => \($ext),1,Gosub(sub-dial-user,s,1(\($ext)))",
+      " same => n,Hangup()")
+' "$USERS_FILE" > "$TMP_DIR/extensions_users.conf"
+
+log "$(jq '.users | length' "$USERS_FILE") user(s): $(jq -r '[.users[] | "\(.extension)"] | join(", ")' "$USERS_FILE")"
+
+#------------------------------------------------------------------------------
+# NAT / RTP / ICE
+#------------------------------------------------------------------------------
+case "$RTP_PORT_START$RTP_PORT_END" in *[!0-9]*) die "RTP_PORT_START/RTP_PORT_END must be numbers" ;; esac
+[ "$RTP_PORT_START" -lt "$RTP_PORT_END" ] || die "RTP_PORT_START must be lower than RTP_PORT_END"
+
+{
+  echo "; Generated — do not edit."
+  echo "rtpstart = $RTP_PORT_START"
+  echo "rtpend = $RTP_PORT_END"
+  if [ -n "$STUN_SERVER" ]; then echo "stunaddr = $STUN_SERVER"; fi
+  if [ -n "$TURN_SERVER" ]; then
+    echo "turnaddr = $TURN_SERVER"
+    echo "turnusername = $TURN_USERNAME"
+    echo "turnpassword = $TURN_PASSWORD"
+  fi
+} > "$TMP_DIR/rtp_general.conf"
+
+container_ips="$(ip -4 -o addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print a[1] }')"
+
+{
+  echo "; Generated — do not edit."
+  if [ -n "$EXTERNAL_IP" ]; then
+    echo "external_media_address = $EXTERNAL_IP"
+    echo "external_signaling_address = $EXTERNAL_IP"
+    # Every peer reaches us through the published ports, so treat them all as
+    # external: SDP and Contact headers then always carry EXTERNAL_IP.
+    echo "local_net = 127.0.0.1/32"
+  fi
+} > "$TMP_DIR/pjsip_transport_nat.conf"
+
+{
+  echo "; Generated — do not edit."
+  if [ -n "$EXTERNAL_IP" ] && [ -n "$container_ips" ]; then
+    echo "[ice_host_candidates]"
+    for ip in $container_ips; do
+      if [ "$ip" != "$EXTERNAL_IP" ]; then
+        # Advertise EXTERNAL_IP (reachable through the published RTP range) and
+        # keep the container address for peers on the same Docker network.
+        echo "$ip => $EXTERNAL_IP,include_local_address"
+      fi
+    done
+  fi
+} > "$TMP_DIR/rtp_ice_host_candidates.conf"
+
+if [ -n "$EXTERNAL_IP" ]; then
+  log "external address $EXTERNAL_IP (container: $(echo $container_ips | tr ' ' ','))"
+else
+  log "EXTERNAL_IP not set: advertising container addresses only ($(echo $container_ips | tr ' ' ','))"
+fi
+log "RTP ports $RTP_PORT_START-$RTP_PORT_END${STUN_SERVER:+, STUN $STUN_SERVER}${TURN_SERVER:+, TURN $TURN_SERVER}"
+
+#------------------------------------------------------------------------------
+# Install atomically
+#------------------------------------------------------------------------------
+for f in "$TMP_DIR"/*.conf; do
+  install -m 0640 "$f" "$OUT_DIR/$(basename "$f")"
+done
+if [ "$(id -u)" = "0" ] && id asterisk >/dev/null 2>&1; then
+  chown -R asterisk:asterisk "$OUT_DIR"
+fi

@@ -1,0 +1,10 @@
+{
+  "users": [
+    { "extension": "1001", "name": "Alice Johnson", "type": "webrtc", "password": "__RANDOM__" },
+    { "extension": "1002", "name": "Bob Smith",     "type": "webrtc", "password": "__RANDOM__" },
+    { "extension": "1003", "name": "Carol White",   "type": "webrtc", "password": "__RANDOM__" },
+    { "extension": "1004", "name": "David Brown",   "type": "webrtc", "password": "__RANDOM__" },
+    { "extension": "2001", "name": "Desk Phone 1",  "type": "sip",    "password": "__RANDOM__" },
+    { "extension": "2002", "name": "Desk Phone 2",  "type": "sip",    "password": "__RANDOM__" }
+  ]
+}

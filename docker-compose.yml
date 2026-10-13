@@ -1,0 +1,76 @@
+name: asterisk22
+
+services:
+  asterisk:
+    build:
+      context: ./asterisk
+    image: asterisk22-webrtc:22.11.0
+    # Asterisk puts its hostname in the From/Contact of every request it sends.
+    # Docker's default (the random container ID) can start with a digit, which is
+    # not a valid SIP host: JsSIP-based clients then silently drop incoming calls.
+    hostname: asterisk
+    restart: unless-stopped
+    environment:
+      EXTERNAL_IP: ${EXTERNAL_IP:-}
+      RTP_PORT_START: ${RTP_PORT_START:-10000}
+      RTP_PORT_END: ${RTP_PORT_END:-10099}
+      STUN_SERVER: ${STUN_SERVER:-}
+      TURN_SERVER: ${TURN_SERVER:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_PASSWORD: ${TURN_PASSWORD:-}
+    ports:
+      - "5060:5060/udp"                  # SIP
+      - "5060:5060/tcp"                  # SIP
+      - "5061:5061/tcp"                  # SIP over TLS
+      - "8089:8089/tcp"                  # SIP over secure WebSocket (direct)
+      - "127.0.0.1:8088:8088/tcp"        # SIP over WebSocket (local dev only)
+      - "${RTP_PORT_START:-10000}-${RTP_PORT_END:-10099}:${RTP_PORT_START:-10000}-${RTP_PORT_END:-10099}/udp"
+    volumes:
+      - ./asterisk/config:/etc/asterisk:ro
+      - ./users.json:/etc/pbx/users.json:ro
+      - ./certs:/certs:ro
+      - asterisk-spool:/var/spool/asterisk
+      - asterisk-logs:/var/log/asterisk
+    ulimits:
+      nofile: 65536
+
+  web:
+    build:
+      context: ./web
+    image: asterisk22-webphone:1.0.0
+    restart: unless-stopped
+    depends_on:
+      asterisk:
+        condition: service_healthy
+    environment:
+      ASTERISK_WS_URL: ws://asterisk:8088/ws
+      USERS_FILE: /etc/pbx/users.json
+      TLS_CERT: /certs/server.crt
+      TLS_KEY: /certs/server.key
+      CLIENT_ICE_SERVERS: ${CLIENT_ICE_SERVERS:-[]}
+    ports:
+      - "${HTTPS_PORT:-8443}:8443"
+      - "${HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./users.json:/etc/pbx/users.json:ro
+      - ./certs:/certs:ro
+
+  # End-to-end tests (docker compose --profile test run --rm e2e)
+  e2e:
+    profiles: ["test"]
+    build:
+      context: ./web
+      dockerfile: tests/e2e.Dockerfile
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      BASE_URL: https://web:8443
+      USERS_FILE: /etc/pbx/users.json
+    volumes:
+      - ./users.json:/etc/pbx/users.json:ro
+    ipc: host
+
+volumes:
+  asterisk-spool:
+  asterisk-logs:

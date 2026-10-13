@@ -1,0 +1,9 @@
+#!/bin/sh
+# Regenerates the user configuration from users.json and applies it live.
+#   docker compose exec asterisk asterisk-reload-users
+set -eu
+asterisk-gen-config
+asterisk -rx "module reload res_pjsip.so" >/dev/null
+asterisk -rx "dialplan reload" >/dev/null
+echo "Users reloaded:"
+asterisk -rx "pjsip show endpoints" | grep -E "^ Endpoint:" || true
