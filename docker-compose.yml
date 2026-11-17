@@ -22,6 +22,7 @@ services:
       - "5060:5060/udp"                  # SIP
       - "5060:5060/tcp"                  # SIP
       - "5061:5061/tcp"                  # SIP over TLS
+      - "5061:5061/udp"                  # SIP (Twilio trunk + agent phones)
       - "8089:8089/tcp"                  # SIP over secure WebSocket (direct)
       - "127.0.0.1:8088:8088/tcp"        # SIP over WebSocket (local dev only)
       - "${RTP_PORT_START:-10000}-${RTP_PORT_END:-10099}:${RTP_PORT_START:-10000}-${RTP_PORT_END:-10099}/udp"

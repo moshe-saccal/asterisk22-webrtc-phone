@@ -97,6 +97,28 @@ Point Zoiper, Linphone, MicroSIP or a desk phone at `EXTERNAL_IP:5060` (UDP or T
 the reverse; Asterisk transcodes the audio as needed (Opus ⇄ G.722/µ-law). Video between a browser
 and a SIP phone works when both sides support VP8 or H.264.
 
+### Twilio trunk and agent phones
+
+`asterisk/config/pjsip_twilio.conf` is the PJSIP port of the old chan_sip `sip.conf` (chan_sip no
+longer exists in Asterisk 22). It adds:
+
+- a UDP transport on **5061** (the Twilio Origination URI port; 5061/tcp stays SIP over TLS);
+- `twilio-trunk`: termination to `sdm-staging.pstn.twilio.com:5060` with `from_domain`
+  `165.227.41.222`. Inbound calls are accepted, without authentication, only from Twilio's
+  signalling addresses `54.172.60.0`–`54.172.60.3`;
+- the SIP phones `test` and `agent1`–`agent5` (G.711, context `trusted`).
+
+| Context | Who | Can reach |
+|---------|-----|-----------|
+| `from-twilio` | inbound PSTN calls | rings `TWILIO_RING_GROUP` (agent1–agent5) |
+| `trusted` | agent phones | users, agents, services, and the PSTN through Twilio (`+E.164`, `011…`, `1NXXNXXXXXX`, `NXXNXXXXXX`) |
+| `from-internal` | users.json accounts | users, agents and services; **no** PSTN |
+
+Set `TWILIO_CALLERID` in `extensions.conf` `[globals]` to a Twilio number if Twilio rejects the
+agents' caller ID. In production, `EXTERNAL_IP` must be the server's public address. Twilio is
+matched by source IP, so Docker must preserve client addresses, which it does on a Linux host with
+the default iptables publishing.
+
 ## The web phone
 
 | Feature | Details |
